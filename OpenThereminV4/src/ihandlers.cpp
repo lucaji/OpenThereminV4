@@ -408,12 +408,16 @@ ISR(INT1_vect) {
 /* VOLUME read - interrupt service routine for capturing volume counter value */
 ISR(INT0_vect) {
     vol_counter_i = TCNT1;
+    #if DDS_DEBOUNCE_MODE == DDS_DEBOUNCE_MODE_LEGACY
     debounce_v = 0;
+    #endif
 }
 
 /* PITCH read - interrupt service routine for capturing pitch counter value */
 ISR(TIMER1_CAPT_vect) {
+    #if DDS_DEBOUNCE_MODE == DDS_DEBOUNCE_MODE_LEGACY
     debounce_p = 0;
+    #endif
 }
 
 /* PITCH read absolute frequency for calibration measurement */

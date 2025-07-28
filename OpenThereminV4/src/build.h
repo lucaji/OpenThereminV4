@@ -20,7 +20,7 @@
 #define SERIAL_MODE_DEBUG 1             // initializes the serial port at 57600 bps and emits debug information
 #define SERIAL_MODE_MIDI 2              // Initializes the serial port at 31250 bps and emits MIDI note (experimental)
 // select one option from above
-#define SERIAL_MODE SERIAL_MODE_DEBUG
+#define SERIAL_MODE SERIAL_MODE_OFF
 
 #if SERIAL_MODE == SERIAL_MODE_DEBUG
   #define DEBUG_PRINT(x)     Serial.print(x)
@@ -37,7 +37,7 @@
  */
 // if defined, will emit sound feedback
 // comment it out for silent operation (only LED feedback)
-#define ENABLE_AUDIO_FEEDBACK
+//#define ENABLE_AUDIO_FEEDBACK
 
 /*
  * CV_OUTPUT_MODE sets options for the CV output jack
@@ -51,7 +51,7 @@
 #define CV_OUTPUT_MODE_OFF 0            // disables the CV output - this saves resources - for a slightly better audio quality if not needed at all.
 #define CV_OUTPUT_MODE_LOG 1            // uses a logarithmic curve for CV output (1V/Oct for Moog & Roland)
 #define CV_OUTPUT_MODE_LINEAR 2         // uses a linear transfer function for CV output (819Hz/V for Korg & Yamaha)
-#define CV_OUTPUT_MODE CV_OUTPUT_MODE_LINEAR
+#define CV_OUTPUT_MODE CV_OUTPUT_MODE_OFF
 
 /*
  * GATE OUTPUT
@@ -100,12 +100,12 @@
  * [Catmull-Rom Spline](https://en.wikipedia.org/wiki/Cubic_Hermite_spline#Catmull%E2%80%93Rom_spline)
  * 
  */
-#define INTERPOLATION_NONE        0             // best choice for 328p, clean harmonic content, highest responsiveness
+#define INTERPOLATION_NONE        0             // best choice for 328p, clean harmonic content, highest responsiveness, higher pitch range
 #define INTERPOLATION_LINEAR      1             // smooths low-frequency pitches, introduces slight harmonic content
 #define INTERPOLATION_HERMITE     2             // heavy computing budget - introduces latency
 #define INTERPOLATION_CATMULL_ROM 3             // heavy computing budget - introduces latency
 #define INTERPOLATION_MODE_INTERACTIVE 127      // for testing purposes, includes all the above code, but at each mute->unmute operation it will rotate between the modes.
-#define INTERPOLATION_MODE INTERPOLATION_MODE_INTERACTIVE
+#define INTERPOLATION_MODE INTERPOLATION_NONE
 
 /*
  * INCLUDES A PRECISE PURE SINEWAVE IF DEFINED
@@ -123,7 +123,7 @@
  * sounding waveforms pretty accurately.
  * 
  */
-#define WAVEFORM_INCLUDE_PURE_SINE
+//#define WAVEFORM_INCLUDE_PURE_SINE
 
 /*
  * PITCH and VOLUME measurement debounce strategy
