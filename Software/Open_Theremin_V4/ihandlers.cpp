@@ -2,6 +2,7 @@
 #include "SPImcpDAC.h"
 #include "timer.h"
 #include "build.h"
+#include "hw.h"
 
 #include "theremin_sintable0.h"
 #include "theremin_sintable1.h"
@@ -25,16 +26,6 @@ const int16_t *const wavetables[] = {
 
 static const uint32_t MCP_DAC_BASE = 2048;
 
-#define INT0_STATE (PIND & (1 << PORTD2))
-#define PC_STATE (PINB & (1 << PORTB0))
-
-// Added by ThF 20200419
-// #define TH_DEBUG 			// <-- comment this out for normal operation
-// end
-
-#ifdef TH_DEBUG
-#include "hw.h"
-#endif
 
 volatile uint16_t vScaledVolume = 0;
 volatile uint16_t vPointerIncrement = 0;
@@ -112,7 +103,7 @@ ISR(INT1_vect) {
 
 // Added by ThF 20200419
 #ifdef TH_DEBUG
-    HW_LED2_ON;
+    HW_LED_RED_ON;
 #endif
 
     // Latch previously written DAC value:
@@ -138,7 +129,7 @@ ISR(INT1_vect) {
 
     incrementTimer(); // update 32us timer
 
-    if (PC_STATE) {
+    if (F_PITCH_PIN) {
         debounce_p++;
     }
     if (debounce_p == 3) {
@@ -150,7 +141,7 @@ ISR(INT1_vect) {
         pitchValueAvailable = true;
     }
 
-    if (INT0_STATE) {
+    if (F_VOL_PIN) {
         debounce_v++;
     }
     if (debounce_v == 3) {
@@ -179,7 +170,7 @@ ISR(INT1_vect) {
     if (reenableInt1) { EIMSK |= (1 << INT1); }
 // Added by ThF 20200419
 #ifdef TH_DEBUG
-    HW_LED2_OFF;
+    HW_LED_RED_OFF;
 #endif
 }
 

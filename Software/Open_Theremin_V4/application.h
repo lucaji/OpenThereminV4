@@ -19,8 +19,8 @@ class Application {
     static const uint16_t MAX_VOLUME = 4095;
 
     static const int16_t BUTTON_PIN = 6;
-    static const int16_t LED_PIN_1    = 18;
-    static const int16_t LED_PIN_2    = 19;
+    static const int16_t LED_BLUE_PIN    = 18;
+    static const int16_t LED_RED_PIN    = 19;
     
     static const int16_t PITCH_POT = 0;
     static const int16_t VOLUME_POT = 1;

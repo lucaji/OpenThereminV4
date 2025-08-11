@@ -26,25 +26,25 @@ void Application::setup() {
     Serial.begin(Application::BAUD);
 #endif
 
-    pinMode(Application::BUTTON_PIN, INPUT_PULLUP);
-    pinMode(Application::LED_PIN_1, OUTPUT);
-    pinMode(Application::LED_PIN_2, OUTPUT);
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    pinMode(LED_BLUE_PIN, OUTPUT);
+    pinMode(LED_RED_PIN, OUTPUT);
 
-    HW_LED1_ON; HW_LED2_OFF;
+    HW_LED_BLUE_ON; HW_LED_RED_OFF;
 
+    // read complete configuration parameters before initialization
+    EEPROM.get(EEPROM_PITCH_DAC_VOLTAGE_ADDRESS, pitchDAC);
+    EEPROM.get(EEPROM_VOLUME_DAC_VOLTAGE_ADDRESS, volumeDAC);
+    EEPROM.get(EEPROM_PITCH_DAC_CALIBRATION_BASE_ADDRESS, pitchCalibrationBase);
+    EEPROM.get(EEPROM_VOLUME_DAC_CALIBRATION_BASE_ADDRESS, volCalibrationBase);
+    // use EEPROM values for calibration
     SPImcpDACinit();
-
-    EEPROM.get(0, pitchDAC);
-    EEPROM.get(2, volumeDAC);
-
     SPImcpDAC2Asend(pitchDAC);
     SPImcpDAC2Bsend(volumeDAC);
 
+    // start the DDS wave generator
     ihInitialiseTimer();
     ihInitialiseInterrupts();
-
-    EEPROM.get(4, pitchCalibrationBase);
-    EEPROM.get(8, volCalibrationBase);
 }
 
 unsigned long Application::GetQMeasurement() {
@@ -140,9 +140,9 @@ mloop: // Main loop avoiding the GCC "optimization"
         _state = CALIBRATING;
         _mode = _mode == NORMAL ? MUTE : NORMAL;
         if (_mode == NORMAL) {
-            HW_LED1_ON; HW_LED2_OFF;
+            HW_LED_BLUE_ON; HW_LED_RED_OFF;
         } else {
-            HW_LED1_OFF; HW_LED2_ON;
+            HW_LED_BLUE_OFF; HW_LED_RED_ON;
         }
     }
 
@@ -151,7 +151,7 @@ mloop: // Main loop avoiding the GCC "optimization"
     }
 
     if (_state == CALIBRATING && timerExpired(65000)) {
-        HW_LED1_ON; HW_LED2_ON;
+        HW_LED_BLUE_ON; HW_LED_RED_ON;
 
         playStartupSound();
 
@@ -165,7 +165,7 @@ mloop: // Main loop avoiding the GCC "optimization"
         calibrate();
 
         _mode = NORMAL;
-        HW_LED2_OFF;
+        HW_LED_RED_OFF;
 
         while (HW_BUTTON_PRESSED) {}
         _state = PLAYING;
@@ -278,8 +278,8 @@ void Application::calibrate() {
     while (!volumeValueAvailable && timerUnexpiredMillis(10)) {}
     volCalibrationBase = vol;
 
-    EEPROM.put(4, pitchCalibrationBase);
-    EEPROM.put(8, volCalibrationBase);
+    EEPROM.put(EEPROM_PITCH_DAC_CALIBRATION_BASE_ADDRESS, pitchCalibrationBase);
+    EEPROM.put(EEPROM_VOLUME_DAC_CALIBRATION_BASE_ADDRESS, volCalibrationBase);
 }
 
 void Application::calibrate_pitch() {
@@ -294,7 +294,7 @@ void Application::calibrate_pitch() {
     Serial.begin(115200);
     Serial.println("\nPITCH CALIBRATION\n");
 
-    HW_LED1_ON; HW_LED2_ON;
+    HW_LED_BLUE_ON; HW_LED_RED_ON;
 
     ihInitialisePitchMeasurement();
     interrupts();
@@ -341,11 +341,11 @@ void Application::calibrate_pitch() {
         pitchXn0 = pitchXn1;
         pitchXn1 = pitchXn2;
 
-        HW_LED1_TOGGLE;
+        HW_LED_BLUE_TOGGLE;
     }
     delay(100);
 
-    EEPROM.put(0, pitchXn0);
+    EEPROM.put(EEPROM_PITCH_DAC_VOLTAGE_ADDRESS, pitchXn0);
 }
 
 void Application::calibrate_volume() {
@@ -400,11 +400,11 @@ void Application::calibrate_volume() {
 
         volumeXn0 = volumeXn1;
         volumeXn1 = volumeXn2;
-        HW_LED1_TOGGLE;
+        HW_LED_BLUE_TOGGLE;
     }
-    EEPROM.put(2, volumeXn0);
+    EEPROM.put(EEPROM_VOLUME_DAC_VOLTAGE_ADDRESS, volumeXn0);
 
-    HW_LED1_ON; HW_LED2_OFF;
+    HW_LED_BLUE_ON; HW_LED_RED_OFF;
 
     Serial.println("\nCALIBRATION COMPLETED\n");
 }
