@@ -1,5 +1,7 @@
 #include <Arduino.h>
 
+#include "build.h"
+
 #ifndef _TIMER_H
 #define _TIMER_H
 
@@ -36,8 +38,9 @@ inline bool timerUnexpiredMillis(uint16_t milliseconds) {
 void ticktimer (uint16_t ticks);
 void millitimer (uint16_t milliseconds);
 
-#if SERIAL_ENABLED
+#if SERIAL_PORT_MODE == SERIAL_PORT_MODE_MIDI
+// constant delay to send out MIDI events - if enabled in "build.h"
 const uint16_t TICKS_100_MILLIS = millisToTicks(100);
-#endif //SERIAL_ENABLED
+#endif
 
 #endif // _TIMER_H

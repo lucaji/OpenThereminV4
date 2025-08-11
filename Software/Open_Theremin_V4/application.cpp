@@ -22,8 +22,12 @@ static int32_t volCalibrationBase = 0;
 Application::Application() {}
 
 void Application::setup() {
-#if SERIAL_ENABLED
-    Serial.begin(Application::BAUD);
+    // initializes the serial port if needed to the correct speed
+    // see "build.h" file
+#if SERIAL_PORT_MODE & SERIAL_PORT_MODE_MIDI
+    Serial.begin(SERIAL_SPEED_MIDI);
+#elif SERIAL_PORT_MODE == SERIAL_PORT_MODE_DEBUG
+    Serial.begin(SERIAL_SPEED_DEBUG);
 #endif
 
     pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -109,8 +113,6 @@ void Application::loop() {
     uint8_t registerValue = 2;
     uint16_t tmpVolume;
     int16_t tmpPitch;
-    uint16_t tmpOct;
-    uint16_t tmpLog;
 
 mloop: // Main loop avoiding the GCC "optimization"
 
@@ -171,10 +173,11 @@ mloop: // Main loop avoiding the GCC "optimization"
         _state = PLAYING;
     }
 
-#if SERIAL_ENABLED
+#if SERIAL_PORT_MODE == SERIAL_PORT_MODE_MIDI
+    // MIDI note events are sent out only if enabled in "build.h"
     if (timerExpired(TICKS_100_MILLIS)) {
         resetTimer();
-        Serial.write(pitch & 0xff); // Send char on serial (if used)
+        Serial.write(pitch & 0xff);
         Serial.write((pitch >> 8) & 0xff);
     }
 #endif
@@ -187,33 +190,34 @@ mloop: // Main loop avoiding the GCC "optimization"
         pitch_l = pitch_v;
 
         // set wave frequency for each mode
-        switch (_mode) {
-            case MUTE: break;
-            case NORMAL:
-                tmpPitch = ((pitchCalibrationBase - pitch_v) + 2048 - (pitchPotValue << 2));
-                tmpPitch = min(tmpPitch, 16383);    // Unaudible upper limit just to prevent DAC overflow
-                tmpPitch = max(tmpPitch, 0);            // Silence behing zero beat
-                setWavetableSampleAdvance(tmpPitch >> registerValue);
-                if (tmpPitch != pitch_p) { 
+        if (_mode == NORMAL) {
+            // if playing and not mute
+            tmpPitch = ((pitchCalibrationBase - pitch_v) + 2048 - (pitchPotValue << 2));
+            tmpPitch = min(tmpPitch, 16383);    // Unaudible upper limit just to prevent DAC overflow
+            tmpPitch = max(tmpPitch, 0);            // Silence behing zero beat
+            setWavetableSampleAdvance(tmpPitch >> registerValue);
+            if (tmpPitch != pitch_p) { 
+                pitch_p = tmpPitch;
+#if CV_OUTPUT_MODE == CV_OUTPUT_MODE_LOG
                     // output new pitch CV value only if pitch value changed (saves runtime resources)
-                    pitch_p = tmpPitch;
-#if CV_LOG
-                    tmpOct = 0;
+                    // 1V/Oct for Moog & Roland
+                    uint16_t tmpOct = 0;
                     while (tmpPitch > 1023) {
                         tmpOct += 819;
                         tmpPitch >>= 1;
                     }
                     tmpPitch -= 512;
                     tmpPitch = max(tmpPitch, 0);
-                    tmpLog = (((uint32_t)tmpPitch * 819) >> 9);
+                    uint16_t tmpLog = (((uint32_t)tmpPitch * 819) >> 9);
                     pitchCV = (tmpOct + tmpLog) - 48;
-                    pitchCV = max(pitchCV, 0);  // 1V/Oct for Moog & Roland
-#else
-                    pitchCV = tmpPitch >> 2;    // 819Hz/V for Korg & Yamaha
-#endif
+                    pitchCV = max(pitchCV, 0);
                     pitchCVAvailable = true;
-                }
-                break;
+#elif CV_OUTPUT_MODE == CV_OUTPUT_MODE_LINEAR
+                    // 819Hz/V for Korg & Yamaha
+                    pitchCV = tmpPitch >> 2;
+                    pitchCVAvailable = true;
+#endif // CV OUT IF ENABLED
+            }
         }
         pitchValueAvailable = false;
     }
@@ -228,25 +232,26 @@ mloop: // Main loop avoiding the GCC "optimization"
         vol_l = vol_v;
 
         if (_mode == MUTE) {
-            vol_v = 0;
+            vScaledVolume = 0;
         } else {
             vol_v = MAX_VOLUME - (volCalibrationBase - vol_v) / 2 + (volumePotValue << 2) - 1024;
+            // Limit and set volume value
+            vol_v = min(vol_v, 4095);
+            vol_v = max(vol_v, 0);
+            tmpVolume = vol_v >> 4;
+            // Give vScaledVolume a pseudo-exponential characteristic for the final audio output
+            vScaledVolume = tmpVolume * (tmpVolume + 2);
         }
 
-        // Limit and set volume value
-        vol_v = min(vol_v, 4095);
-        vol_v = max(vol_v, 0);
-        tmpVolume = vol_v >> 4;
-
-        // Most synthesizers "exponentiate" the volume CV themselves, thus send the "raw" volume for CV:
+#if CV_OUTPUT_MODE != CV_OUTPUT_MODE_OFF
+        tmpVolume = tmpVolume >> 1;
+        // Most synthesizers "exponentiate" the volume CV themselves
+        // so we send the "raw" volume for CV
         volCV = vol_v;
         volumeCVAvailable = true;
 
-        // Give vScaledVolume a pseudo-exponential characteristic:
-        vScaledVolume = tmpVolume * (tmpVolume + 2);
-        tmpVolume = tmpVolume >> 1;
-
-        if (!gate_p && (tmpVolume >= GATE_ON)) {
+        // Drive the GATE output pin if CV is activated in "build.h"
+        if (!gate_p && (tmpVolume >= GATE_ON_THRESHOLD_LEVEL)) {
             gate_p = true;
             // pull the gate up to sense, first (to prevent short-circuiting the IO pin:
             GATE_PULLUP;
@@ -254,11 +259,12 @@ mloop: // Main loop avoiding the GCC "optimization"
                 // if it goes up, drive the gate full high:
                 GATE_DRIVE_HIGH;
             }
-        } else if (gate_p && (tmpVolume <= GATE_OFF)) {
+        } else if (gate_p && (tmpVolume <= GATE_OFF_THRESHOLD_LEVEL)) {
             gate_p = false;
             // drive the gate low:
             GATE_DRIVE_LOW;
         }
+#endif // GATE IF ENABLED
         volumeValueAvailable = false;
     }
 
@@ -291,8 +297,7 @@ void Application::calibrate_pitch() {
     static long pitchfn1 = 0;
     static long pitchfn = 0;
 
-    Serial.begin(115200);
-    Serial.println("\nPITCH CALIBRATION\n");
+    DEBUG_PRINTLN("\nPITCH CALIBRATION\n");
 
     HW_LED_BLUE_ON; HW_LED_RED_ON;
 
@@ -301,7 +306,7 @@ void Application::calibrate_pitch() {
     SPImcpDACinit();
 
     qMeasurement = GetQMeasurement(); // Measure X1 clock frequency
-    Serial.print("X1 Freq: "); Serial.println(qMeasurement);
+    DEBUG_PRINT("X1 Freq: "); DEBUG_PRINTLN(qMeasurement);
 
     q0 = (16000000 / qMeasurement * 500000); //Calculated set frequency based on X1 clock frequency
 
@@ -310,7 +315,7 @@ void Application::calibrate_pitch() {
 
     pitchfn = q0 - PitchFreqOffset; // Add offset calue to set frequency
 
-    Serial.print("\nPitch Set Frequency: "); Serial.println(pitchfn);
+    DEBUG_PRINT("\nPitch Set Frequency: "); DEBUG_PRINTLN(pitchfn);
 
     SPImcpDAC2Bsend(1600);
 
@@ -322,7 +327,7 @@ void Application::calibrate_pitch() {
     delay(100);
     pitchfn1 = GetPitchMeasurement();
 
-    Serial.print("Frequency tuning range: "); Serial.print(pitchfn0); Serial.print(" to "); Serial.println(pitchfn1);
+    DEBUG_PRINT("Frequency tuning range: "); DEBUG_PRINT(pitchfn0); DEBUG_PRINT(" to "); DEBUG_PRINTLN(pitchfn1);
 
     while (abs(pitchfn0 - pitchfn1) > CalibrationTolerance) {
         SPImcpDAC2Asend(pitchXn0);
@@ -335,8 +340,8 @@ void Application::calibrate_pitch() {
 
         pitchXn2 = pitchXn1 - ((pitchXn1 - pitchXn0) * pitchfn1) / (pitchfn1 - pitchfn0); // new DAC value
 
-        Serial.print("\nDAC value L: "); Serial.print(pitchXn0); Serial.print(" Freq L: "); Serial.println(pitchfn0);
-        Serial.print("DAC value H: "); Serial.print(pitchXn1); Serial.print(" Freq H: "); Serial.println(pitchfn1);
+        DEBUG_PRINT("\nDAC value L: "); DEBUG_PRINT(pitchXn0); DEBUG_PRINT(" Freq L: "); DEBUG_PRINTLN(pitchfn0);
+        DEBUG_PRINT("DAC value H: "); DEBUG_PRINT(pitchXn1); DEBUG_PRINT(" Freq H: "); DEBUG_PRINTLN(pitchfn1);
 
         pitchXn0 = pitchXn1;
         pitchXn1 = pitchXn2;
@@ -357,8 +362,7 @@ void Application::calibrate_volume() {
     static long volumefn1 = 0;
     static long volumefn = 0;
 
-    Serial.begin(115200);
-    Serial.println("\nVOLUME CALIBRATION");
+    DEBUG_PRINTLN("\nVOLUME CALIBRATION");
 
     ihInitialiseVolumeMeasurement();
     interrupts();
@@ -370,7 +374,7 @@ void Application::calibrate_volume() {
     q0 = (16000000 / qMeasurement * 460765);
     volumefn = q0 - VolumeFreqOffset;
 
-    Serial.print("\nVolume Set Frequency: "); Serial.println(volumefn);
+    DEBUG_PRINT("\nVolume Set Frequency: "); DEBUG_PRINTLN(volumefn);
 
     SPImcpDAC2Bsend(volumeXn0);
     delay_NOP(44316); //44316=100ms
@@ -382,7 +386,7 @@ void Application::calibrate_volume() {
     delay_NOP(44316); //44316=100ms
     volumefn1 = GetVolumeMeasurement();
 
-    Serial.print("Frequency tuning range: "); Serial.print(volumefn0); Serial.print(" to "); Serial.println(volumefn1);
+    DEBUG_PRINT("Frequency tuning range: "); DEBUG_PRINT(volumefn0); DEBUG_PRINT(" to "); DEBUG_PRINTLN(volumefn1);
 
     while (abs(volumefn0 - volumefn1) > CalibrationTolerance) {
         SPImcpDAC2Bsend(volumeXn0);
@@ -395,8 +399,8 @@ void Application::calibrate_volume() {
 
         volumeXn2 = volumeXn1 - ((volumeXn1 - volumeXn0) * volumefn1) / (volumefn1 - volumefn0); // calculate new DAC value
 
-        Serial.print("\nDAC value L: "); Serial.print(volumeXn0); Serial.print(" Freq L: "); Serial.println(volumefn0);
-        Serial.print("DAC value H: "); Serial.print(volumeXn1); Serial.print(" Freq H: "); Serial.println(volumefn1);
+        DEBUG_PRINT("\nDAC value L: "); DEBUG_PRINT(volumeXn0); DEBUG_PRINT(" Freq L: "); DEBUG_PRINTLN(volumefn0);
+        DEBUG_PRINT("DAC value H: "); DEBUG_PRINT(volumeXn1); DEBUG_PRINT(" Freq H: "); DEBUG_PRINTLN(volumefn1);
 
         volumeXn0 = volumeXn1;
         volumeXn1 = volumeXn2;
@@ -406,7 +410,7 @@ void Application::calibrate_volume() {
 
     HW_LED_BLUE_ON; HW_LED_RED_OFF;
 
-    Serial.println("\nCALIBRATION COMPLETED\n");
+    DEBUG_PRINTLN("\nCALIBRATION COMPLETED\n");
 }
 
 void Application::playNote(float hz, uint16_t milliseconds = 500, uint8_t volume = 255) {

@@ -18,22 +18,9 @@ class Application {
     private:
     static const uint16_t MAX_VOLUME = 4095;
 
-    static const int16_t BUTTON_PIN = 6;
-    static const int16_t LED_BLUE_PIN    = 18;
-    static const int16_t LED_RED_PIN    = 19;
-    
-    static const int16_t PITCH_POT = 0;
-    static const int16_t VOLUME_POT = 1;
-    static const int16_t WAVE_SELECT_POT = 7;
-    static const int16_t REGISTER_SELECT_POT = 6;
     int16_t pitch_p = -1; 
     int32_t vol_p = -1;
     bool gate_p = false;
-
-    
-#if SERIAL_ENABLED    
-    static const int BAUD = 115200;
-#endif
 
     AppState _state = PLAYING;
     AppMode    _mode = MUTE;
