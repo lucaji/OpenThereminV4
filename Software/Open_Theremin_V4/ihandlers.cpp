@@ -23,6 +23,8 @@ const int16_t *const wavetables[] = {
     sine_table6,
     sine_table7
 };
+// number of included wavetables to adapt potentiometer hysteresis and range.
+const uint8_t num_wavetables = (sizeof(wavetables) / sizeof(wavetables[0]));
 
 static const uint32_t MCP_DAC_BASE = 2048;
 

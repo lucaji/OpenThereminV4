@@ -6,7 +6,6 @@
 #include "timer.h"
 #include "EEPROM.h"
 
-const AppMode AppModeValues[] = { MUTE, NORMAL };
 const int16_t CalibrationTolerance = 15;
 const int16_t PitchFreqOffset = 700;
 const int16_t VolumeFreqOffset = 700;
@@ -18,6 +17,73 @@ static int16_t volumeDAC = 0;
 static float qMeasurement = 0;
 
 static int32_t volCalibrationBase = 0;
+
+// UI parameters (touch button and potentiometers)
+#define UI_BUTTON_LONG_PRESS_DURATION   60000
+// Potentiometer variables, hysteresis and scaling
+
+#define HYST_SCALE 0.95
+static const int16_t pot_register_selection_hysteresis = 1024.0 / 3 * HYST_SCALE;   // only three position octave selection
+static const int16_t pot_waveform_selection_hysteresis = 1024.0 / num_wavetables * HYST_SCALE;  // map the waveform selection poti depending on how many waveforms are being loaded in the DDS generator
+static const int16_t pot_rf_virtual_field_adjust_hysteresis = 1024 / 64;    // reduce the volume and pitch field potis to 64 steps to slightly reduce audio jitter when moving them
+int16_t pitchPotValue = 0, pitchPotValueL = 0;
+int16_t volumePotValue = 0, volumePotValueL = 0;
+int16_t registerPotValue = 0, registerPotValueL = 0;
+int16_t wavePotValue = 0, wavePotValueL = 0;
+uint8_t registerValue = 2; // octave register
+uint8_t registerValueL = 2; // octave register compare
+
+/**
+ * @brief Read all the potentiometer position and update the changed values
+ *        if the hysteresis constant have been surpassed.
+ * 
+ * @param force
+ *        optional boolean flag to force the updates (at power-on)
+ */
+void ui_potis_read_all(bool force = false) {
+    pitchPotValueL = analogRead(PITCH_POT);
+    if (force || abs(pitchPotValue - pitchPotValueL) >= pot_rf_virtual_field_adjust_hysteresis) { 
+        pitchPotValue = pitchPotValueL;
+    }
+    
+    volumePotValueL = analogRead(VOLUME_POT);
+    if (force || abs(volumePotValue - volumePotValueL) >= pot_rf_virtual_field_adjust_hysteresis) { 
+        volumePotValue = volumePotValueL;
+    }
+
+    registerPotValueL = analogRead(REGISTER_SELECT_POT);
+    if (force || abs(registerPotValue - registerPotValueL) >= pot_register_selection_hysteresis) { 
+        registerPotValue = registerPotValueL;
+        // register pot offset configuration:
+        // Left = -1 octave, Center = 0, Right = +1 octave
+        if (registerPotValue > pot_register_selection_hysteresis * 2) {
+            registerValueL = 1;
+            DEBUG_PRINTLN(F("OCT+1"));
+        } else if (registerPotValue < pot_register_selection_hysteresis) {
+            registerValueL = 3;
+            DEBUG_PRINTLN(F("OCT-1"));
+        } else {
+            registerValueL = 2;
+            DEBUG_PRINTLN(F("OCT+0"));
+        }
+        if (registerValueL != registerValue) {
+            registerValue = registerValueL;
+        }
+    }
+
+    wavePotValueL = analogRead(WAVE_SELECT_POT);
+    if (force || abs(wavePotValue - wavePotValueL) >= pot_waveform_selection_hysteresis) {
+        wavePotValue = wavePotValueL;
+        // map 0–1023 to 0–(num_wavetables - 1)
+        uint16_t scaled = ((uint32_t)wavePotValue * num_wavetables) / 1024;
+        if (scaled >= num_wavetables) scaled = num_wavetables - 1;    // extra safety
+        if (scaled != vWavetableSelector) {
+            vWavetableSelector = scaled;
+            DEBUG_PRINT(F("WAV="));DEBUG_PRINTLN(scaled);
+        }
+    }
+}
+
 
 Application::Application() {}
 
@@ -34,7 +100,13 @@ void Application::setup() {
     pinMode(LED_BLUE_PIN, OUTPUT);
     pinMode(LED_RED_PIN, OUTPUT);
 
-    HW_LED_BLUE_ON; HW_LED_RED_OFF;
+    // red LED indicates standby (muted)
+    // blue LED is lit during performance mode.
+    HW_LED_BLUE_OFF; HW_LED_RED_ON;
+
+    // initialize potentiometer position at startup
+    // force update for correct initialization
+    ui_potis_read_all(true);
 
     // read complete configuration parameters before initialization
     EEPROM.get(EEPROM_PITCH_DAC_VOLTAGE_ADDRESS, pitchDAC);
@@ -106,44 +178,22 @@ void Application::loop() {
     int32_t pitch_v = 0, pitch_l = 0;   // Last value of pitch    (for filtering)
     int32_t vol_v = 0, vol_l = 0;       // Last value of volume (for filtering and for tracking)
 
-    uint16_t volumePotValue = 0;
-    uint16_t pitchPotValue = 0;
-    int registerPotValue, registerPotValueL = 0;
-    int wavePotValue, wavePotValueL = 0;
-    uint8_t registerValue = 2;
     uint16_t tmpVolume;
     int16_t tmpPitch;
 
 mloop: // Main loop avoiding the GCC "optimization"
-
-    pitchPotValue = analogRead(PITCH_POT);
-    volumePotValue = analogRead(VOLUME_POT);
-    registerPotValue = analogRead(REGISTER_SELECT_POT);
-    wavePotValue = analogRead(WAVE_SELECT_POT);
-
-    if ((registerPotValue - registerPotValueL) >= HYST_VAL || (registerPotValueL - registerPotValue) >= HYST_VAL)
-        registerPotValueL = registerPotValue;
-    if (((wavePotValue - wavePotValueL) >= HYST_VAL) || ((wavePotValueL - wavePotValue) >= HYST_VAL))
-        wavePotValueL = wavePotValue;
-    vWavetableSelector = wavePotValueL >> 7;
-
-    // New register pot configuration:
-    // Left = -1 octave, Center = +/- 0, Right = +1 octave
-    if (registerPotValue > 681) {
-        registerValue = 1;
-    } else if (registerPotValue < 342) {
-        registerValue = 3;
-    } else {
-        registerValue = 2;
-    }
+    // continuosly read potentiometers and flag changed values
+    ui_potis_read_all();
 
     if (_state == PLAYING && HW_BUTTON_PRESSED) {
         resetTimer();
         _state = CALIBRATING;
         _mode = _mode == NORMAL ? MUTE : NORMAL;
         if (_mode == NORMAL) {
+            // blue LED indicates performance mode (play)
             HW_LED_BLUE_ON; HW_LED_RED_OFF;
         } else {
+            // red LED indicates mute (standby)
             HW_LED_BLUE_OFF; HW_LED_RED_ON;
         }
     }
@@ -152,7 +202,8 @@ mloop: // Main loop avoiding the GCC "optimization"
         _state = PLAYING;
     }
 
-    if (_state == CALIBRATING && timerExpired(65000)) {
+    if (_state == CALIBRATING && timerExpired(UI_BUTTON_LONG_PRESS_DURATION)) {
+        // both LEDs indicate calibration mode
         HW_LED_BLUE_ON; HW_LED_RED_ON;
 
         playStartupSound();

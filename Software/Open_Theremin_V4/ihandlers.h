@@ -25,6 +25,9 @@ extern volatile bool pitchCVAvailable;          // Pitch CV flag
 extern volatile uint8_t  vWavetableSelector;
 extern volatile uint16_t vPointerIncrement;     // Table pointer increment
 
+// the number of wavetable being loaded in the DDS generator (ihandlers.cpp)
+extern const uint8_t num_wavetables;
+
 inline void setWavetableSampleAdvance(uint16_t val) { vPointerIncrement = val;}
 
 void ihInitialiseTimer();
