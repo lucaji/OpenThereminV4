@@ -34,8 +34,7 @@
 #define HW_SPI_MISO_BIT 4 // unused in this configuration
 #define HW_SPI_MOSI_BIT 3
 
-static inline void SPImcpDACinit()
-{
+static inline void SPImcpDACinit() {
 	// initialize the latch pin:
 	MCP_DAC_LDAC_DDR |= _BV(MCP_DAC_LDAC_BIT);
 	MCP_DAC_LDAC_PORT |= _BV(MCP_DAC_LDAC_BIT);
@@ -44,8 +43,8 @@ static inline void SPImcpDACinit()
 	MCP_DAC_CS_PORT  |= _BV(MCP_DAC_CS_BIT);
 	MCP_DAC2_CS_DDR  |= _BV(MCP_DAC2_CS_BIT);
 	MCP_DAC2_CS_PORT |= _BV(MCP_DAC2_CS_BIT);
-  MCP_DAC3_CS_DDR  |= _BV(MCP_DAC3_CS_BIT);
-  MCP_DAC3_CS_PORT |= _BV(MCP_DAC3_CS_BIT);
+  	MCP_DAC3_CS_DDR  |= _BV(MCP_DAC3_CS_BIT);
+  	MCP_DAC3_CS_PORT |= _BV(MCP_DAC3_CS_BIT);
 	// initialize the hardware SPI pins:
 	HW_SPI_DDR |= _BV(HW_SPI_SCK_BIT);
 	HW_SPI_DDR |= _BV(HW_SPI_MOSI_BIT);
@@ -54,39 +53,33 @@ static inline void SPImcpDACinit()
 	SPSR = _BV(SPI2X);  // double the SPI clock, ideally we get 8 MHz, so that a 16bit word goes out in 3.5us (5.6us when called from an interrupt) including CS asserting/deasserting
 }
 
-static inline void SPImcpDACtransmit(uint16_t data)
-{
+static inline void SPImcpDACtransmit(uint16_t data) {
 	// Send highbyte and wait for complete
 	SPDR = highByte(data);
-  asm("nop");
-	while (!(SPSR & _BV(SPIF)))
-		;
+  	asm("nop");
+	while (!(SPSR & _BV(SPIF))) {}
 	// Send lowbyte and wait for complete
 	SPDR = lowByte(data);
-  asm("nop");
-	while (!(SPSR & _BV(SPIF)))
-		;
+  	asm("nop");
+	while (!(SPSR & _BV(SPIF))) {}
 }
 
-static inline void SPImcpDAClatch()
-{
+static inline void SPImcpDAClatch() {
 	MCP_DAC_LDAC_PORT &= ~_BV(MCP_DAC_LDAC_BIT);
 	MCP_DAC_LDAC_PORT |= _BV(MCP_DAC_LDAC_BIT);
 }
 
-static inline void SPImcpDACsend(uint16_t data)
-{
+static inline void SPImcpDACsend(uint16_t data) {
 	MCP_DAC_CS_PORT &= ~_BV(MCP_DAC_CS_BIT);
-  // Sanitize input data and add DAC config MSBs
-  data &= 0x0FFF;
-  data |= 0x7000;
+  	// Sanitize input data and add DAC config MSBs
+  	data &= 0x0FFF;
+  	data |= 0x7000;
 	SPImcpDACtransmit(data);
 	MCP_DAC_CS_PORT |= _BV(MCP_DAC_CS_BIT);
 	// Do not latch immpediately, let's do it at the very beginning of the next interrupt to get consistent timing
 }
 
-static inline void SPImcpDAC2Asend(uint16_t data)
-{
+static inline void SPImcpDAC2Asend(uint16_t data) {
 	MCP_DAC2_CS_PORT &= ~_BV(MCP_DAC2_CS_BIT);
 	// Sanitize input data and add DAC config MSBs
 	data &= 0x0FFF;
@@ -96,8 +89,7 @@ static inline void SPImcpDAC2Asend(uint16_t data)
 	SPImcpDAClatch();
 }
 
-static inline void SPImcpDAC2Bsend(uint16_t data)
-{
+static inline void SPImcpDAC2Bsend(uint16_t data) {
 	MCP_DAC2_CS_PORT &= ~_BV(MCP_DAC2_CS_BIT);
 	// Sanitize input data and add DAC config MSBs
 	data &= 0x0FFF;
@@ -107,26 +99,24 @@ static inline void SPImcpDAC2Bsend(uint16_t data)
 	SPImcpDAClatch();
 }
 
-static inline void SPImcpDAC3Asend(uint16_t data)
-{
-  MCP_DAC3_CS_PORT &= ~_BV(MCP_DAC3_CS_BIT);
-  // Sanitize input data and add DAC config MSBs
-  data &= 0x0FFF;
-  data |= 0x7000;
-  SPImcpDACtransmit(data);
-  MCP_DAC3_CS_PORT |= _BV(MCP_DAC3_CS_BIT);
-  SPImcpDAClatch();
+static inline void SPImcpDAC3Asend(uint16_t data) {
+  	MCP_DAC3_CS_PORT &= ~_BV(MCP_DAC3_CS_BIT);
+  	// Sanitize input data and add DAC config MSBs
+  	data &= 0x0FFF;
+  	data |= 0x7000;
+  	SPImcpDACtransmit(data);
+  	MCP_DAC3_CS_PORT |= _BV(MCP_DAC3_CS_BIT);
+  	SPImcpDAClatch();
 }
 
-static inline void SPImcpDAC3Bsend(uint16_t data)
-{
-  MCP_DAC3_CS_PORT &= ~_BV(MCP_DAC3_CS_BIT);
-  // Sanitize input data and add DAC config MSBs
-  data &= 0x0FFF;
-  data |= 0xF000;
-  SPImcpDACtransmit(data);
-  MCP_DAC3_CS_PORT |= _BV(MCP_DAC3_CS_BIT);
-  SPImcpDAClatch();
+static inline void SPImcpDAC3Bsend(uint16_t data) {
+  	MCP_DAC3_CS_PORT &= ~_BV(MCP_DAC3_CS_BIT);
+  	// Sanitize input data and add DAC config MSBs
+  	data &= 0x0FFF;
+  	data |= 0xF000;
+  	SPImcpDACtransmit(data);
+  	MCP_DAC3_CS_PORT |= _BV(MCP_DAC3_CS_BIT);
+  	SPImcpDAClatch();
 }
 
 #endif

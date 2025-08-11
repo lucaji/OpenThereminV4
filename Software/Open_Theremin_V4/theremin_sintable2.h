@@ -1,8 +1,12 @@
-/* Theremin WAVE Table "Sinus" - 1024 entries full table, amplitude -2048.,*/
+/**
+ * Theremin WAVE Table "Sinus"
+ * 1024 entries full table
+ * 12 bits amplitude -2048..2048
+ */
 
-#include <avr/pgmspace.h>
+#include <Arduino.h>
 
-const int16_t sine_table3[1024] PROGMEM = {\
+const int16_t sine_table2[1024] PROGMEM = {
 9,
 13,
 15,
