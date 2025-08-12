@@ -11,6 +11,21 @@
 #ifndef _BUILD_H
 #define _BUILD_H
 
+/*
+ * AUDIO_FEEDBACK_MODE
+ * 
+ * - AUDIO_FEEDBACK_ON
+ *   enables short audio feedbacks (beeps) at startup and calibration
+ *   along the visual indication of the current mode.
+ * 
+ * - AUDIO_FEEDBACK_OFF
+ *   disables the audio feedback (silent), keeping the visual
+ *   indication of the current mode.
+ * 
+ */
+#define AUDIO_FEEDBACK_ON   0
+#define AUDIO_FEEDBACK_OFF  1
+#define AUDIO_FEEDBACK_MODE AUDIO_FEEDBACK_ON
 
 /*
  * CV_OUTPUT_MODE sets options for the CV/GATE output jack
