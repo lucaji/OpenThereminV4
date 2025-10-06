@@ -1,584 +1,295 @@
-#include "Arduino.h"
-
 #include "application.h"
-
+#include "calibration.h"
 #include "hw.h"
 #include "SPImcpDAC.h"
 #include "ihandlers.h"
 #include "timer.h"
 #include "EEPROM.h"
 
-const AppMode AppModeValues[] = {MUTE, NORMAL};
-const int16_t CalibrationTolerance = 15;
-const int16_t PitchFreqOffset = 700;
-const int16_t VolumeFreqOffset = 700;
-const int8_t HYST_VAL = 140;
+// state machine
+typedef enum { CALIBRATING = 0, PLAYING } theremin_state_t;
+// storage state global var
+theremin_state_t g_state = PLAYING;
+// audio output state global var
+bool g_audio_output_is_enabled = false;
 
-static int32_t pitchCalibrationBase = 0;
-static int32_t pitchCalibrationBaseFreq = 0;
-static int32_t pitchCalibrationConstant = 0;
-static int32_t pitchSensitivityConstant = 70000;
-static int16_t pitchDAC = 0;
-static int16_t volumeDAC = 0;
-static float qMeasurement = 0;
+static const uint16_t MAX_VOLUME = 4095;
 
-static int32_t volCalibrationBase = 0;
 
-Application::Application()
-  : _state(PLAYING),
-    _mode(NORMAL) {};
-
-void Application::setup()
-{
-#if SERIAL_ENABLED
-  Serial.begin(Application::BAUD);
+#if AUDIO_FEEDBACK_MODE == AUDIO_FEEDBACK_ON
+const float MIDDLE_C = 261.6;
+void playTone(float hz, uint16_t milliseconds = 500, uint8_t volume = 255) {
+    const float HZ_SCALING_FACTOR = 2.09785;
+    bool old_audio_state = g_audio_output_is_enabled;
+    g_audio_output_is_enabled = true; // force emit the tone
+    setWavetableSampleAdvance((uint16_t)(hz * HZ_SCALING_FACTOR));
+    millitimer(milliseconds);
+    g_audio_output_is_enabled = old_audio_state; // restore previous mute state
+}
 #endif
 
-  HW_LED1_ON;
-  HW_LED2_OFF;
+// UI parameters (touch button and potentiometers)
+#define UI_BUTTON_LONG_PRESS_DURATION   60000
+// Potentiometer variables, hysteresis and scaling
+#define HYST_SCALE 0.95
+static const int16_t pot_register_selection_hysteresis = 1024.0 / 3 * HYST_SCALE;   // only three position octave selection
+static const int16_t pot_waveform_selection_hysteresis = 1024.0 / num_wavetables * HYST_SCALE;  // map the waveform selection poti depending on how many waveforms are being loaded in the DDS generator
+static const int16_t pot_rf_virtual_field_adjust_hysteresis = 1024 / 64;    // reduce the volume and pitch field potis to 64 steps to slightly reduce audio jitter when moving them
+int16_t pitchPotValue = 0, pitchPotValueL = 0;
+int16_t volumePotValue = 0, volumePotValueL = 0;
+int16_t registerPotValue = 0, registerPotValueL = 0;
+int16_t wavePotValue = 0, wavePotValueL = 0;
+uint8_t registerValue = 2; // octave register
+uint8_t registerValueL = 2; // octave register compare
 
-  pinMode(Application::BUTTON_PIN, INPUT_PULLUP);
-  pinMode(Application::LED_PIN_1, OUTPUT);
-  pinMode(Application::LED_PIN_2, OUTPUT);
+/**
+ * @brief Read all the potentiometer position and update the changed values
+ *        if the hysteresis constant have been surpassed.
+ * 
+ * @param force
+ *        optional boolean flag to force the updates (at power-on)
+ */
+void ui_potis_read_all(bool force = false) {
+    pitchPotValueL = analogRead(PITCH_POT);
+    if (force || abs(pitchPotValue - pitchPotValueL) >= pot_rf_virtual_field_adjust_hysteresis) { 
+        pitchPotValue = pitchPotValueL;
+    }
+    
+    volumePotValueL = analogRead(VOLUME_POT);
+    if (force || abs(volumePotValue - volumePotValueL) >= pot_rf_virtual_field_adjust_hysteresis) { 
+        volumePotValue = volumePotValueL;
+    }
 
-  digitalWrite(Application::LED_PIN_1, HIGH); // turn the LED off by making the voltage LOW
+    registerPotValueL = analogRead(REGISTER_SELECT_POT);
+    if (force || abs(registerPotValue - registerPotValueL) >= pot_register_selection_hysteresis) { 
+        registerPotValue = registerPotValueL;
+        // register pot offset configuration:
+        // Left = -1 octave, Center = 0, Right = +1 octave
+        if (registerPotValue > pot_register_selection_hysteresis * 2) {
+            registerValueL = 1;
+            DEBUG_PRINTLN(F("OCT+1"));
+        } else if (registerPotValue < pot_register_selection_hysteresis) {
+            registerValueL = 3;
+            DEBUG_PRINTLN(F("OCT-1"));
+        } else {
+            registerValueL = 2;
+            DEBUG_PRINTLN(F("OCT+0"));
+        }
+        if (registerValueL != registerValue) {
+            registerValue = registerValueL;
+        }
+    }
 
-  SPImcpDACinit();
-
-  EEPROM.get(0, pitchDAC);
-  EEPROM.get(2, volumeDAC);
-
-  SPImcpDAC2Asend(pitchDAC);
-  SPImcpDAC2Bsend(volumeDAC);
-
-  initialiseTimer();
-  initialiseInterrupts();
-
-  EEPROM.get(4, pitchCalibrationBase);
-  EEPROM.get(8, volCalibrationBase);
+    wavePotValueL = analogRead(WAVE_SELECT_POT);
+    if (force || abs(wavePotValue - wavePotValueL) >= pot_waveform_selection_hysteresis) {
+        wavePotValue = wavePotValueL;
+        // map 0–1023 to 0–(num_wavetables - 1)
+        uint16_t scaled = ((uint32_t)wavePotValue * num_wavetables) / 1024;
+        if (scaled >= num_wavetables) scaled = num_wavetables - 1;    // extra safety
+        if (scaled != vWavetableSelector) {
+            vWavetableSelector = scaled;
+            DEBUG_PRINT(F("WAV="));DEBUG_PRINTLN(scaled);
+        }
+    }
 }
 
-void Application::initialiseTimer()
-{
-  ihInitialiseTimer();
+
+void theremin_setup() {
+    // initializes the serial port if needed to the correct speed
+    // see "build.h" file
+#if SERIAL_PORT_MODE & SERIAL_PORT_MODE_MIDI
+    Serial.begin(SERIAL_SPEED_MIDI);
+#elif SERIAL_PORT_MODE == SERIAL_PORT_MODE_DEBUG
+    Serial.begin(SERIAL_SPEED_DEBUG);
+#endif
+
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    pinMode(LED_BLUE_PIN, OUTPUT);
+    pinMode(LED_RED_PIN, OUTPUT);
+
+    // red LED indicates standby (muted)
+    // blue LED is lit during performance mode.
+    HW_LED_BLUE_OFF; HW_LED_RED_ON;
+
+    // initialize potentiometer position at startup
+    // force update for correct initialization
+    ui_potis_read_all(true);
+    calibration_read();
+
+    // start the DDS wave generator
+    ihInitialiseTimer();
+    ihInitialiseInterrupts();
 }
 
-void Application::initialiseInterrupts()
-{
-  ihInitialiseInterrupts();
-}
+void theremin_loop() {
+    int32_t pitch_v = 0, pitch_l = 0;   // Last value of pitch    (for filtering)
+    int32_t vol_v = 0, vol_l = 0;       // Last value of volume (for filtering and for tracking)
 
-void Application::InitialisePitchMeasurement()
-{
-  ihInitialisePitchMeasurement();
-}
+    int16_t pitch_p = -1; 
+    int32_t vol_p = -1;
 
-void Application::InitialiseVolumeMeasurement()
-{
-  ihInitialiseVolumeMeasurement();
-}
-
-unsigned long Application::GetQMeasurement()
-{
-  int qn = 0;
-
-  TCCR1B = (1 << CS10);
-
-  while (!(PIND & (1 << PORTD3)))
-    ;
-  while ((PIND & (1 << PORTD3)))
-    ;
-
-  TCNT1 = 0;
-  timer_overflow_counter = 0;
-  while (qn < 31250)
-  {
-    while (!(PIND & (1 << PORTD3)))
-      ;
-    qn++;
-    while ((PIND & (1 << PORTD3)))
-      ;
-  };
-
-  TCCR1B = 0;
-
-  unsigned long frequency = TCNT1;
-  unsigned long temp = 65536 * (unsigned long)timer_overflow_counter;
-  frequency += temp;
-
-  return frequency;
-}
-
-unsigned long Application::GetPitchMeasurement()
-{
-  TCNT1 = 0;
-  timer_overflow_counter = 0;
-  TCCR1B = (1 << CS12) | (1 << CS11) | (1 << CS10);
-
-  delay(1000);
-
-  TCCR1B = 0;
-
-  unsigned long frequency = TCNT1;
-  unsigned long temp = 65536 * (unsigned long)timer_overflow_counter;
-  frequency += temp;
-
-  return frequency;
-}
-
-unsigned long Application::GetVolumeMeasurement()
-{
-  timer_overflow_counter = 0;
-
-  TCNT0 = 0;
-  TCNT1 = 49911;
-  TCCR0B = (1 << CS02) | (1 << CS01) | (1 << CS00); // //External clock source on T0 pin. Clock on rising edge.
-  TIFR1 = (1 << TOV1);                              //Timer1 INT Flag Reg: Clear Timer Overflow Flag
-
-  while (!(TIFR1 & ((1 << TOV1))))
-    ;                                                         // on Timer 1 overflow (1s)
-  TCCR0B = 0;                                                 // Stop TimerCounter 0
-  unsigned long frequency = TCNT0;                            // get counter 0 value
-  unsigned long temp = (unsigned long)timer_overflow_counter; // and overflow counter
-
-  frequency += temp * 256;
-
-  return frequency;
-}
-
-AppMode Application::nextMode()
-{
-  return _mode == NORMAL ? MUTE : AppModeValues[_mode + 1];
-}
-
-void Application::loop()
-{
-  int32_t pitch_v = 0, pitch_l = 0; // Last value of pitch  (for filtering)
-  int32_t vol_v = 0, vol_l = 0;    // Last value of volume (for filtering and for tracking)
-
-  uint16_t volumePotValue = 0;
-  uint16_t pitchPotValue = 0;
-  int registerPotValue, registerPotValueL = 0;
-  int wavePotValue, wavePotValueL = 0;
-  uint8_t registerValue = 2;
-  uint16_t tmpVolume;
-  int16_t tmpPitch;
-  uint16_t tmpOct;
-  uint16_t tmpLog;
+    uint16_t tmpVolume;
+    int16_t tmpPitch;
 
 mloop: // Main loop avoiding the GCC "optimization"
+    // continuosly read potentiometers and flag changed values
+    ui_potis_read_all();
 
-  pitchPotValue = analogRead(PITCH_POT);
-  volumePotValue = analogRead(VOLUME_POT);
-  registerPotValue = analogRead(REGISTER_SELECT_POT);
-  wavePotValue = analogRead(WAVE_SELECT_POT);
-
-  if ((registerPotValue - registerPotValueL) >= HYST_VAL || (registerPotValueL - registerPotValue) >= HYST_VAL)
-    registerPotValueL = registerPotValue;
-  if (((wavePotValue - wavePotValueL) >= HYST_VAL) || ((wavePotValueL - wavePotValue) >= HYST_VAL))
-    wavePotValueL = wavePotValue;
-
-  vWavetableSelector = wavePotValueL >> 7;
-
-  // New register pot configuration:
-  // Left = -1 octave, Center = +/- 0, Right = +1 octave
-  if (registerPotValue > 681)
-  {
-    registerValue = 1;
-  }
-  else if (registerPotValue < 342)
-  {
-    registerValue = 3;
-  }
-  else
-  {
-    registerValue = 2;
-  }
-
-  if (_state == PLAYING && HW_BUTTON_PRESSED)
-  {
-
-    resetTimer();
-    _state = CALIBRATING;
-    _mode = nextMode();
-
-    if (_mode == NORMAL)
-    {
-      HW_LED1_ON;
-      HW_LED2_OFF;
-    }
-    else
-    {
-      HW_LED1_OFF;
-      HW_LED2_ON;
-    };
-    // playModeSettingSound();
-  }
-
-  if (_state == CALIBRATING && HW_BUTTON_RELEASED)
-  {
-
-    _state = PLAYING;
-  };
-
-  if (_state == CALIBRATING && timerExpired(65000))
-  {
-    HW_LED1_ON;
-    HW_LED2_ON;
-
-    playStartupSound();
-
-    calibrate_pitch();
-    calibrate_volume();
-
-    initialiseTimer();
-    initialiseInterrupts();
-
-    playCalibratingCountdownSound();
-    calibrate();
-
-    _mode = NORMAL;
-    HW_LED2_OFF;
-
-    while (HW_BUTTON_PRESSED)
-      ; // NOP
-    _state = PLAYING;
-  };
-
-#if SERIAL_ENABLED
-  if (timerExpired(TICKS_100_MILLIS))
-  {
-    resetTimer();
-    Serial.write(pitch & 0xff); // Send char on serial (if used)
-    Serial.write((pitch >> 8) & 0xff);
-  }
-#endif
-
-  if (pitchValueAvailable)
-  { // If capture event
-    pitch_p = pitch;
-    pitch_v = pitch; // Averaging pitch values
-    pitch_v = pitch_l + ((pitch_v - pitch_l) >> 2);
-    pitch_l = pitch_v;
-
-    //HW_LED2_ON;
-
-    // set wave frequency for each mode
-    switch (_mode)
-    {
-      case MUTE: /* NOTHING! */;
-        break;
-      case NORMAL:
-        tmpPitch = ((pitchCalibrationBase - pitch_v) + 2048 - (pitchPotValue << 2));
-        tmpPitch = min(tmpPitch, 16383);  // Unaudible upper limit just to prevent DAC overflow
-        tmpPitch = max(tmpPitch, 0);      // Silence behing zero beat
-        setWavetableSampleAdvance(tmpPitch >> registerValue);
-        if (tmpPitch != pitch_p)
-        { // output new pitch CV value only if pitch value changed (saves runtime resources)
-          pitch_p = tmpPitch;
-#if CV_LOG
-          tmpOct = 0;
-          while (tmpPitch > 1023) {
-            tmpOct += 819;
-            tmpPitch >>= 1;
-          }
-          tmpPitch -= 512;
-          tmpPitch = max(tmpPitch, 0);
-          tmpLog = (((uint32_t)tmpPitch * 819) >> 9);
-          pitchCV = (tmpOct + tmpLog) - 48;
-          pitchCV = max(pitchCV, 0);        // 1V/Oct for Moog & Roland
-#else
-          pitchCV = tmpPitch >> 2;                       // 819Hz/V for Korg & Yamaha
-#endif
-          pitchCVAvailable = true;
+    if (g_state == PLAYING && HW_BUTTON_PRESSED) {
+        resetTimer();
+        g_state = CALIBRATING;
+        g_audio_output_is_enabled = !g_audio_output_is_enabled;
+        if (g_audio_output_is_enabled) {
+            // blue LED indicates performance mode (play)
+            HW_LED_BLUE_ON; HW_LED_RED_OFF;
+        } else {
+            // red LED indicates mute (standby)
+            HW_LED_BLUE_OFF; HW_LED_RED_ON;
         }
-        break;
-    };
-
-    //  HW_LED2_OFF;
-
-    pitchValueAvailable = false;
-  }
-
-  if (volumeValueAvailable && (vol != vol_p))
-  { // If capture event AND volume value changed (saves runtime resources)
-    vol_p = vol;
-    vol = max(vol, 5000);
-
-    vol_v = vol; // Averaging volume values
-    vol_v = vol_l + ((vol_v - vol_l) >> 2);
-    vol_l = vol_v;
-
-    switch (_mode)
-    {
-      case MUTE:
-        vol_v = 0;
-        break;
-      case NORMAL:
-        vol_v = MAX_VOLUME - (volCalibrationBase - vol_v) / 2 + (volumePotValue << 2) - 1024;
-        break;
-    };
-
-    // Limit and set volume value
-    vol_v = min(vol_v, 4095);
-    vol_v = max(vol_v, 0);
-    tmpVolume = vol_v >> 4;
-
-    // Most synthesizers "exponentiate" the volume CV themselves, thus send the "raw" volume for CV:
-    volCV = vol_v;
-    volumeCVAvailable = true;
-
-    // Give vScaledVolume a pseudo-exponential characteristic:
-    vScaledVolume = tmpVolume * (tmpVolume + 2);
-
-    tmpVolume = tmpVolume >> 1;
-
-    if (!gate_p && (tmpVolume >= GATE_ON))
-    {
-      gate_p = true;
-      // pull the gate up to sense, first (to prevent short-circuiting the IO pin:
-      GATE_PULLUP;
-      if (GATE_SENSE)
-      { // if it goes up, drive the gate full high:
-        GATE_DRIVE_HIGH;
-      }
-    }
-    else if (gate_p && (tmpVolume <= GATE_OFF))
-    {
-      gate_p = false;
-      // drive the gate low:
-      GATE_DRIVE_LOW;
     }
 
+    if (g_state == CALIBRATING && HW_BUTTON_RELEASED) {
+        g_state = PLAYING;
+    }
 
+    if (g_state == CALIBRATING && timerExpired(UI_BUTTON_LONG_PRESS_DURATION)) {
+        // signal the player to prepare for calibration
+        for (int i = 0; i<10; i++) {
+            millitimer(200 - (i * 10));
+            HW_LED_BLUE_TOGGLE; HW_LED_RED_TOGGLE;
+        }
+        // both LEDs indicate calibration mode
+        HW_LED_BLUE_ON; HW_LED_RED_ON;
+        // flag audio as disabled during calibration for coherence
+        // even though the interrupt handlers will be disabled
+        g_audio_output_is_enabled = false;
 
-    volumeValueAvailable = false;
-  }
+        #if AUDIO_FEEDBACK_MODE == AUDIO_FEEDBACK_ON
+            playTone(MIDDLE_C, 150, 25);
+            playTone(MIDDLE_C * 2, 150, 25);
+            playTone(MIDDLE_C * 4, 150, 25);
+        #endif
 
-  goto mloop; // End of main loop
-}
+        bool success = calibration_start();
+        if (success) {
+            HW_LED_BLUE_ON; HW_LED_RED_OFF;
+            g_audio_output_is_enabled = true;
+            #if AUDIO_FEEDBACK_MODE == AUDIO_FEEDBACK_ON
+                playTone(MIDDLE_C * 2, 150, 25);
+                playTone(MIDDLE_C * 2, 150, 25);
+            #endif
+        } else {
+            // visual feedback for failed calibration
+            HW_LED_BLUE_OFF;
+            for (int i = 0; i<10; i++) {
+                millitimer(200 - (i * 10));
+                HW_LED_RED_TOGGLE;
+            }
+            HW_LED_RED_ON;
+            g_audio_output_is_enabled = false;
+            #if AUDIO_FEEDBACK_MODE == AUDIO_FEEDBACK_ON
+                playTone(MIDDLE_C * 4, 150, 25);
+                playTone(MIDDLE_C, 150, 25);
+            #endif
+        }
+        g_state = PLAYING;
+    }
 
-void Application::calibrate()
-{
-  resetPitchFlag();
-  resetTimer();
-  savePitchCounter();
-  while (!pitchValueAvailable && timerUnexpiredMillis(10))
-    ; // NOP
-  pitchCalibrationBase = pitch;
-  pitchCalibrationBaseFreq = FREQ_FACTOR / pitchCalibrationBase;
-  pitchCalibrationConstant = FREQ_FACTOR / pitchSensitivityConstant / 2 + 200;
+#if SERIAL_PORT_MODE == SERIAL_PORT_MODE_MIDI
+    // MIDI note events are sent out only if enabled in "build.h"
+    if (timerExpired(TICKS_100_MILLIS)) {
+        resetTimer();
+        Serial.write(pitch & 0xff);
+        Serial.write((pitch >> 8) & 0xff);
+    }
+#endif
 
-  resetVolFlag();
-  resetTimer();
-  saveVolCounter();
-  while (!volumeValueAvailable && timerUnexpiredMillis(10))
-    ; // NOP
-  volCalibrationBase = vol;
+    if (pitchValueAvailable) { 
+        // If capture event
+        pitch_p = pitch;
+        pitch_v = pitch; // Averaging pitch values
+        pitch_v = pitch_l + ((pitch_v - pitch_l) >> 2);
+        pitch_l = pitch_v;
 
-  EEPROM.put(4, pitchCalibrationBase);
-  EEPROM.put(8, volCalibrationBase);
-}
+        // set wave frequency for each mode
+        if (g_audio_output_is_enabled) {
+            // if playing and not mute
+            tmpPitch = ((pitchCalibrationBase - pitch_v) + 2048 - (pitchPotValue << 2));
+            tmpPitch = min(tmpPitch, 16383);    // Unaudible upper limit just to prevent DAC overflow
+            tmpPitch = max(tmpPitch, 0);            // Silence behing zero beat
+            setWavetableSampleAdvance(tmpPitch >> registerValue);
+            if (tmpPitch != pitch_p) { 
+                pitch_p = tmpPitch;
+#if CV_OUTPUT_MODE == CV_OUTPUT_MODE_LOG
+                    // output new pitch CV value only if pitch value changed (saves runtime resources)
+                    // 1V/Oct for Moog & Roland
+                    uint16_t tmpOct = 0;
+                    while (tmpPitch > 1023) {
+                        tmpOct += 819;
+                        tmpPitch >>= 1;
+                    }
+                    tmpPitch -= 512;
+                    tmpPitch = max(tmpPitch, 0);
+                    uint16_t tmpLog = (((uint32_t)tmpPitch * 819) >> 9);
+                    pitchCV = (tmpOct + tmpLog) - 48;
+                    pitchCV = max(pitchCV, 0);
+                    pitchCVAvailable = true;
+#elif CV_OUTPUT_MODE == CV_OUTPUT_MODE_LINEAR
+                    // 819Hz/V for Korg & Yamaha
+                    pitchCV = tmpPitch >> 2;
+                    pitchCVAvailable = true;
+#endif // CV OUT IF ENABLED
+            }
+        }
+        pitchValueAvailable = false;
+    }
 
-void Application::calibrate_pitch()
-{
+    if (volumeValueAvailable && (vol != vol_p)) { 
+        // If capture event AND volume value changed (saves runtime resources)
+        vol_p = vol;
+        vol = max(vol, 5000);
 
-  static int16_t pitchXn0 = 0;
-  static int16_t pitchXn1 = 0;
-  static int16_t pitchXn2 = 0;
-  static float q0 = 0;
-  static long pitchfn0 = 0;
-  static long pitchfn1 = 0;
-  static long pitchfn = 0;
+        vol_v = vol; // Averaging volume values
+        vol_v = vol_l + ((vol_v - vol_l) >> 2);
+        vol_l = vol_v;
 
-  Serial.begin(115200);
-  Serial.println("\nPITCH CALIBRATION\n");
+        if (g_audio_output_is_enabled) {
+            vol_v = MAX_VOLUME - (volCalibrationBase - vol_v) / 2 + (volumePotValue << 2) - 1024;
+            // Limit and set volume value
+            vol_v = min(vol_v, 4095);
+            vol_v = max(vol_v, 0);
+            tmpVolume = vol_v >> 4;
+            // Give vScaledVolume a pseudo-exponential characteristic for the final audio output
+            vScaledVolume = tmpVolume * (tmpVolume + 2);
+        } else {
+            vScaledVolume = 0;
+        }
 
-  HW_LED1_ON;
-  HW_LED2_ON;
+#if CV_OUTPUT_MODE != CV_OUTPUT_MODE_OFF
+        static bool gate_p = false;
+        tmpVolume = tmpVolume >> 1;
+        // Most synthesizers "exponentiate" the volume CV themselves
+        // so we send the "raw" volume for CV
+        volCV = vol_v;
+        volumeCVAvailable = true;
 
-  InitialisePitchMeasurement();
-  interrupts();
-  SPImcpDACinit();
+        // Drive the GATE output pin if CV is activated in "build.h"
+        if (!gate_p && (tmpVolume >= GATE_ON_THRESHOLD_LEVEL)) {
+            gate_p = true;
+            // pull the gate up to sense, first (to prevent short-circuiting the IO pin:
+            GATE_PULLUP;
+            if (GATE_SENSE) { 
+                // if it goes up, drive the gate full high:
+                GATE_DRIVE_HIGH;
+            }
+        } else if (gate_p && (tmpVolume <= GATE_OFF_THRESHOLD_LEVEL)) {
+            gate_p = false;
+            // drive the gate low:
+            GATE_DRIVE_LOW;
+        }
+#endif // GATE IF ENABLED
+        volumeValueAvailable = false;
+    }
 
-  qMeasurement = GetQMeasurement(); // Measure Arudino clock frequency
-  Serial.print("Arudino Freq: ");
-  Serial.println(qMeasurement);
-
-  q0 = (16000000 / qMeasurement * 500000); //Calculated set frequency based on Arudino clock frequency
-
-  pitchXn0 = 0;
-  pitchXn1 = 4095;
-
-  pitchfn = q0 - PitchFreqOffset; // Add offset calue to set frequency
-
-  Serial.print("\nPitch Set Frequency: ");
-  Serial.println(pitchfn);
-
-  SPImcpDAC2Bsend(1600);
-
-  SPImcpDAC2Asend(pitchXn0);
-  delay(100);
-  pitchfn0 = GetPitchMeasurement();
-
-  SPImcpDAC2Asend(pitchXn1);
-  delay(100);
-  pitchfn1 = GetPitchMeasurement();
-
-  Serial.print("Frequency tuning range: ");
-  Serial.print(pitchfn0);
-  Serial.print(" to ");
-  Serial.println(pitchfn1);
-
-  while (abs(pitchfn0 - pitchfn1) > CalibrationTolerance)
-  { // max allowed pitch frequency offset
-
-    SPImcpDAC2Asend(pitchXn0);
-    delay(100);
-    pitchfn0 = GetPitchMeasurement() - pitchfn;
-
-    SPImcpDAC2Asend(pitchXn1);
-    delay(100);
-    pitchfn1 = GetPitchMeasurement() - pitchfn;
-
-    pitchXn2 = pitchXn1 - ((pitchXn1 - pitchXn0) * pitchfn1) / (pitchfn1 - pitchfn0); // new DAC value
-
-    Serial.print("\nDAC value L: ");
-    Serial.print(pitchXn0);
-    Serial.print(" Freq L: ");
-    Serial.println(pitchfn0);
-    Serial.print("DAC value H: ");
-    Serial.print(pitchXn1);
-    Serial.print(" Freq H: ");
-    Serial.println(pitchfn1);
-
-    pitchXn0 = pitchXn1;
-    pitchXn1 = pitchXn2;
-
-    HW_LED1_TOGGLE;
-  }
-  delay(100);
-
-  EEPROM.put(0, pitchXn0);
-}
-
-void Application::calibrate_volume()
-{
-
-  static int16_t volumeXn0 = 0;
-  static int16_t volumeXn1 = 0;
-  static int16_t volumeXn2 = 0;
-  static float q0 = 0;
-  static long volumefn0 = 0;
-  static long volumefn1 = 0;
-  static long volumefn = 0;
-
-  Serial.begin(115200);
-  Serial.println("\nVOLUME CALIBRATION");
-
-  InitialiseVolumeMeasurement();
-  interrupts();
-  SPImcpDACinit();
-
-  volumeXn0 = 0;
-  volumeXn1 = 4095;
-
-  q0 = (16000000 / qMeasurement * 460765);
-  volumefn = q0 - VolumeFreqOffset;
-
-  Serial.print("\nVolume Set Frequency: ");
-  Serial.println(volumefn);
-
-  SPImcpDAC2Bsend(volumeXn0);
-  delay_NOP(44316); //44316=100ms
-
-  volumefn0 = GetVolumeMeasurement();
-
-  SPImcpDAC2Bsend(volumeXn1);
-
-  delay_NOP(44316); //44316=100ms
-  volumefn1 = GetVolumeMeasurement();
-
-  Serial.print("Frequency tuning range: ");
-  Serial.print(volumefn0);
-  Serial.print(" to ");
-  Serial.println(volumefn1);
-
-  while (abs(volumefn0 - volumefn1) > CalibrationTolerance)
-  {
-
-    SPImcpDAC2Bsend(volumeXn0);
-    delay_NOP(44316); //44316=100ms
-    volumefn0 = GetVolumeMeasurement() - volumefn;
-
-    SPImcpDAC2Bsend(volumeXn1);
-    delay_NOP(44316); //44316=100ms
-    volumefn1 = GetVolumeMeasurement() - volumefn;
-
-    volumeXn2 = volumeXn1 - ((volumeXn1 - volumeXn0) * volumefn1) / (volumefn1 - volumefn0); // calculate new DAC value
-
-    Serial.print("\nDAC value L: ");
-    Serial.print(volumeXn0);
-    Serial.print(" Freq L: ");
-    Serial.println(volumefn0);
-    Serial.print("DAC value H: ");
-    Serial.print(volumeXn1);
-    Serial.print(" Freq H: ");
-    Serial.println(volumefn1);
-
-    volumeXn0 = volumeXn1;
-    volumeXn1 = volumeXn2;
-    HW_LED1_TOGGLE;
-  }
-
-  EEPROM.put(2, volumeXn0);
-
-  HW_LED1_ON;
-  HW_LED2_OFF;
-
-  Serial.println("\nCALIBRATION COMPLETED\n");
-}
-
-void Application::hzToAddVal(float hz)
-{
-  setWavetableSampleAdvance((uint16_t)(hz * HZ_ADDVAL_FACTOR));
-}
-
-void Application::playNote(float hz, uint16_t milliseconds = 500, uint8_t volume = 255)
-{
-  vScaledVolume = volume * (volume + 2);
-  hzToAddVal(hz);
-  millitimer(milliseconds);
-  vScaledVolume = 0;
-}
-
-void Application::playStartupSound()
-{
-  playNote(MIDDLE_C, 150, 25);
-  playNote(MIDDLE_C * 2, 150, 25);
-  playNote(MIDDLE_C * 4, 150, 25);
-}
-
-void Application::playCalibratingCountdownSound()
-{
-  playNote(MIDDLE_C * 2, 150, 25);
-  playNote(MIDDLE_C * 2, 150, 25);
-}
-
-void Application::playModeSettingSound()
-{
-  for (int i = 0; i <= _mode; i++)
-  {
-    playNote(MIDDLE_C * 2, 200, 25);
-    millitimer(100);
-  }
-}
-
-void Application::delay_NOP(unsigned long time)
-{
-  volatile unsigned long i = 0;
-  for (i = 0; i < time; i++)
-  {
-    __asm__ __volatile__("nop");
-  }
+    goto mloop; // End of main loop
 }
