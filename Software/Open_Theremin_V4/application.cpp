@@ -107,9 +107,7 @@ void theremin_setup() {
     pinMode(LED_BLUE_PIN, OUTPUT);
     pinMode(LED_RED_PIN, OUTPUT);
 
-    // red LED indicates standby (muted)
-    // blue LED is lit during performance mode.
-    HW_LED_BLUE_OFF; HW_LED_RED_ON;
+    HW_LED_BLUE_ON; HW_LED_RED_OFF;
 
     // initialize potentiometer position at startup
     // force update for correct initialization
@@ -140,10 +138,8 @@ mloop: // Main loop avoiding the GCC "optimization"
         g_state = CALIBRATING;
         g_audio_output_is_enabled = !g_audio_output_is_enabled;
         if (g_audio_output_is_enabled) {
-            // blue LED indicates performance mode (play)
             HW_LED_BLUE_ON; HW_LED_RED_OFF;
         } else {
-            // red LED indicates mute (standby)
             HW_LED_BLUE_OFF; HW_LED_RED_ON;
         }
     }
@@ -154,10 +150,14 @@ mloop: // Main loop avoiding the GCC "optimization"
 
     if (g_state == CALIBRATING && timerExpired(UI_BUTTON_LONG_PRESS_DURATION)) {
         // signal the player to prepare for calibration
-        for (int i = 0; i<10; i++) {
-            millitimer(200 - (i * 10));
-            HW_LED_BLUE_TOGGLE; HW_LED_RED_TOGGLE;
-        }
+        // uncomment the following lines to have a countdown blink
+        // so that the user can move his/her hands away from the antennas
+        // TODO: update user manual if this function is to be included
+        //       in production.
+        // for (int i = 0; i<10; i++) {
+        //    millitimer(200 - (i * 10));
+        //    HW_LED_BLUE_TOGGLE; HW_LED_RED_TOGGLE;
+        // }
         // both LEDs indicate calibration mode
         HW_LED_BLUE_ON; HW_LED_RED_ON;
         // flag audio as disabled during calibration for coherence
@@ -172,7 +172,7 @@ mloop: // Main loop avoiding the GCC "optimization"
 
         bool success = calibration_start();
         if (success) {
-            HW_LED_BLUE_ON; HW_LED_RED_OFF;
+            //HW_LED_BLUE_ON; HW_LED_RED_OFF;
             g_audio_output_is_enabled = true;
             #if AUDIO_FEEDBACK_MODE == AUDIO_FEEDBACK_ON
                 playTone(MIDDLE_C * 2, 150, 25);
@@ -180,12 +180,14 @@ mloop: // Main loop avoiding the GCC "optimization"
             #endif
         } else {
             // visual feedback for failed calibration
-            HW_LED_BLUE_OFF;
-            for (int i = 0; i<10; i++) {
-                millitimer(200 - (i * 10));
-                HW_LED_RED_TOGGLE;
-            }
-            HW_LED_RED_ON;
+            // please uncomment the following lines
+            // to include this code in production
+            // HW_LED_BLUE_OFF;
+            // for (int i = 0; i<10; i++) {
+            //     millitimer(200 - (i * 10));
+            //     HW_LED_RED_TOGGLE;
+            // }
+            // HW_LED_RED_ON;
             g_audio_output_is_enabled = false;
             #if AUDIO_FEEDBACK_MODE == AUDIO_FEEDBACK_ON
                 playTone(MIDDLE_C * 4, 150, 25);
