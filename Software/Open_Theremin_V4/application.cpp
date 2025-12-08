@@ -11,7 +11,7 @@ typedef enum { CALIBRATING = 0, PLAYING } theremin_state_t;
 // storage state global var
 theremin_state_t g_state = PLAYING;
 // audio output state global var
-bool g_audio_output_is_enabled = false;
+bool g_audio_output_is_enabled = true;
 
 static const uint16_t MAX_VOLUME = 4095;
 
@@ -107,7 +107,7 @@ void theremin_setup() {
     pinMode(LED_BLUE_PIN, OUTPUT);
     pinMode(LED_RED_PIN, OUTPUT);
 
-    HW_LED_BLUE_ON; HW_LED_RED_OFF;
+    HW_LED_BLUE_OFF; HW_LED_RED_ON;
 
     // initialize potentiometer position at startup
     // force update for correct initialization
@@ -138,9 +138,9 @@ mloop: // Main loop avoiding the GCC "optimization"
         g_state = CALIBRATING;
         g_audio_output_is_enabled = !g_audio_output_is_enabled;
         if (g_audio_output_is_enabled) {
-            HW_LED_BLUE_ON; HW_LED_RED_OFF;
-        } else {
             HW_LED_BLUE_OFF; HW_LED_RED_ON;
+        } else {
+            HW_LED_BLUE_ON; HW_LED_RED_OFF;
         }
     }
 
@@ -187,8 +187,8 @@ mloop: // Main loop avoiding the GCC "optimization"
             //     millitimer(200 - (i * 10));
             //     HW_LED_RED_TOGGLE;
             // }
-            // HW_LED_RED_ON;
-            g_audio_output_is_enabled = false;
+            HW_LED_RED_ON;
+            g_audio_output_is_enabled = true;
             #if AUDIO_FEEDBACK_MODE == AUDIO_FEEDBACK_ON
                 playTone(MIDDLE_C * 4, 150, 25);
                 playTone(MIDDLE_C, 150, 25);
